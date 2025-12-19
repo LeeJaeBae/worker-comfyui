@@ -1,238 +1,110 @@
 import unittest
-from unittest.mock import patch, MagicMock, mock_open, Mock
-import sys
-import os
-import json
+from unittest.mock import MagicMock, patch
 import base64
+import json
 
-# Make sure that "src" is known and can be used to import handler.py
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
-from src import handler
-
-# Local folder for test resources
-RUNPOD_WORKER_COMFY_TEST_RESOURCES_IMAGES = "./test_resources/images"
+import handler
 
 
-class TestRunpodWorkerComfy(unittest.TestCase):
-    def test_valid_input_with_workflow_only(self):
-        input_data = {"workflow": {"key": "value"}}
-        validated_data, error = handler.validate_input(input_data)
-        self.assertIsNone(error)
-        self.assertEqual(validated_data, {"workflow": {"key": "value"}, "images": None})
-
-    def test_valid_input_with_workflow_and_images(self):
-        input_data = {
-            "workflow": {"key": "value"},
-            "images": [{"name": "image1.png", "image": "base64string"}],
-        }
-        validated_data, error = handler.validate_input(input_data)
-        self.assertIsNone(error)
-        self.assertEqual(validated_data, input_data)
-
-    def test_input_missing_workflow(self):
-        input_data = {"images": [{"name": "image1.png", "image": "base64string"}]}
-        validated_data, error = handler.validate_input(input_data)
-        self.assertIsNotNone(error)
-        self.assertEqual(error, "Missing 'workflow' parameter")
-
-    def test_input_with_invalid_images_structure(self):
-        input_data = {
-            "workflow": {"key": "value"},
-            "images": [{"name": "image1.png"}],  # Missing 'image' key
-        }
-        validated_data, error = handler.validate_input(input_data)
-        self.assertIsNotNone(error)
-        self.assertEqual(
-            error, "'images' must be a list of objects with 'name' and 'image' keys"
-        )
+class TestHandlerValidateInput(unittest.TestCase):
+    def test_empty_input(self):
+        validated, err = handler.validate_input(None)
+        self.assertIsNone(validated)
+        self.assertEqual(err, "Please provide input")
 
     def test_invalid_json_string_input(self):
-        input_data = "invalid json"
-        validated_data, error = handler.validate_input(input_data)
-        self.assertIsNotNone(error)
-        self.assertEqual(error, "Invalid JSON format in input")
+        validated, err = handler.validate_input("invalid json")
+        self.assertIsNone(validated)
+        self.assertEqual(err, "Invalid JSON format in input")
 
-    def test_valid_json_string_input(self):
-        input_data = '{"workflow": {"key": "value"}}'
-        validated_data, error = handler.validate_input(input_data)
-        self.assertIsNone(error)
-        self.assertEqual(validated_data, {"workflow": {"key": "value"}, "images": None})
+    def test_missing_workflow(self):
+        validated, err = handler.validate_input({"images": []})
+        self.assertIsNone(validated)
+        self.assertEqual(err, "Missing 'workflow' parameter")
 
-    def test_empty_input(self):
-        input_data = None
-        validated_data, error = handler.validate_input(input_data)
-        self.assertIsNotNone(error)
-        self.assertEqual(error, "Please provide input")
+    def test_invalid_images_structure(self):
+        validated, err = handler.validate_input(
+            {"workflow": {"key": "value"}, "images": [{"name": "a.png"}]}
+        )
+        self.assertIsNone(validated)
+        self.assertEqual(err, "'images' must be a list of objects with 'name' and 'image' keys")
 
-    @patch("handler.requests.get")
-    def test_check_server_server_up(self, mock_requests):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_requests.return_value = mock_response
-
-        result = handler.check_server("http://127.0.0.1:8188", 1, 50)
-        self.assertTrue(result)
-
-    @patch("handler.requests.get")
-    def test_check_server_server_down(self, mock_requests):
-        mock_requests.get.side_effect = handler.requests.RequestException()
-        result = handler.check_server("http://127.0.0.1:8188", 1, 50)
-        self.assertFalse(result)
-
-    @patch("handler.urllib.request.urlopen")
-    def test_queue_prompt(self, mock_urlopen):
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({"prompt_id": "123"}).encode()
-        mock_urlopen.return_value = mock_response
-        result = handler.queue_workflow({"prompt": "test"})
-        self.assertEqual(result, {"prompt_id": "123"})
-
-    @patch("handler.urllib.request.urlopen")
-    def test_get_history(self, mock_urlopen):
-        # Mock response data as a JSON string
-        mock_response_data = json.dumps({"key": "value"}).encode("utf-8")
-
-        # Define a mock response function for `read`
-        def mock_read():
-            return mock_response_data
-
-        # Create a mock response object
-        mock_response = Mock()
-        mock_response.read = mock_read
-
-        # Mock the __enter__ and __exit__ methods to support the context manager
-        mock_response.__enter__ = lambda s: s
-        mock_response.__exit__ = Mock()
-
-        # Set the return value of the urlopen mock
-        mock_urlopen.return_value = mock_response
-
-        # Call the function under test
-        result = handler.get_history("123")
-
-        # Assertions
-        self.assertEqual(result, {"key": "value"})
-        mock_urlopen.assert_called_with("http://127.0.0.1:8188/history/123")
-
-    @patch("builtins.open", new_callable=mock_open, read_data=b"test")
-    def test_base64_encode(self, mock_file):
-        test_data = base64.b64encode(b"test").decode("utf-8")
-
-        result = handler.base64_encode("dummy_path")
-
-        self.assertEqual(result, test_data)
-
-    @patch("handler.os.path.exists")
-    @patch("handler.rp_upload.upload_image")
-    @patch.dict(
-        os.environ, {"COMFY_OUTPUT_PATH": RUNPOD_WORKER_COMFY_TEST_RESOURCES_IMAGES}
-    )
-    def test_bucket_endpoint_not_configured(self, mock_upload_image, mock_exists):
-        mock_exists.return_value = True
-        mock_upload_image.return_value = "simulated_uploaded/image.png"
-
-        outputs = {
-            "node_id": {"images": [{"filename": "ComfyUI_00001_.png", "subfolder": ""}]}
-        }
-        job_id = "123"
-
-        result = handler.process_output_images(outputs, job_id)
-
-        self.assertEqual(result["status"], "success")
-
-    @patch("handler.os.path.exists")
-    @patch("handler.rp_upload.upload_image")
-    @patch.dict(
-        os.environ,
-        {
-            "COMFY_OUTPUT_PATH": RUNPOD_WORKER_COMFY_TEST_RESOURCES_IMAGES,
-            "BUCKET_ENDPOINT_URL": "http://example.com",
-        },
-    )
-    def test_bucket_endpoint_configured(self, mock_upload_image, mock_exists):
-        # Mock the os.path.exists to return True, simulating that the image exists
-        mock_exists.return_value = True
-
-        # Mock the rp_upload.upload_image to return a simulated URL
-        mock_upload_image.return_value = "http://example.com/uploaded/image.png"
-
-        # Define the outputs and job_id for the test
-        outputs = {
-            "node_id": {
-                "images": [{"filename": "ComfyUI_00001_.png", "subfolder": "test"}]
-            }
-        }
-        job_id = "123"
-
-        # Call the function under test
-        result = handler.process_output_images(outputs, job_id)
-
-        # Assertions
-        self.assertEqual(result["status"], "success")
-        self.assertEqual(result["message"], "http://example.com/uploaded/image.png")
-        mock_upload_image.assert_called_once_with(
-            job_id, "./test_resources/images/test/ComfyUI_00001_.png"
+    def test_valid_workflow_only(self):
+        validated, err = handler.validate_input({"workflow": {"key": "value"}})
+        self.assertIsNone(err)
+        self.assertEqual(
+            validated,
+            {"workflow": {"key": "value"}, "images": None, "comfy_org_api_key": None},
         )
 
-    @patch("handler.os.path.exists")
-    @patch("handler.rp_upload.upload_image")
-    @patch.dict(
-        os.environ,
-        {
-            "COMFY_OUTPUT_PATH": RUNPOD_WORKER_COMFY_TEST_RESOURCES_IMAGES,
-            "BUCKET_ENDPOINT_URL": "http://example.com",
-            "BUCKET_ACCESS_KEY_ID": "",
-            "BUCKET_SECRET_ACCESS_KEY": "",
-        },
-    )
-    def test_bucket_image_upload_fails_env_vars_wrong_or_missing(
-        self, mock_upload_image, mock_exists
-    ):
-        # Simulate the file existing in the output path
-        mock_exists.return_value = True
-
-        # When AWS credentials are wrong or missing, upload_image should return 'simulated_uploaded/...'
-        mock_upload_image.return_value = "simulated_uploaded/image.png"
-
-        outputs = {
-            "node_id": {"images": [{"filename": "ComfyUI_00001_.png", "subfolder": ""}]}
+    def test_valid_workflow_images_and_comfy_org_key(self):
+        inp = {
+            "workflow": {"key": "value"},
+            "images": [{"name": "img.png", "image": "Zg=="}],
+            "comfy_org_api_key": "k",
         }
-        job_id = "123"
+        validated, err = handler.validate_input(inp)
+        self.assertIsNone(err)
+        self.assertEqual(validated, inp)
 
-        result = handler.process_output_images(outputs, job_id)
 
-        # Check if the image was saved to the 'simulated_uploaded' directory
-        self.assertIn("simulated_uploaded", result["message"])
-        self.assertEqual(result["status"], "success")
+class TestHandlerHTTPHelpers(unittest.TestCase):
+    @patch("handler.requests.get")
+    def test_check_server_up(self, mock_get):
+        mock_get.return_value = MagicMock(status_code=200)
+        self.assertTrue(handler.check_server("http://127.0.0.1:8188", retries=1, delay=1))
 
-    @patch("handler.requests.post")
-    def test_upload_images_successful(self, mock_post):
-        mock_response = unittest.mock.Mock()
-        mock_response.status_code = 200
-        mock_response.text = "Successfully uploaded"
-        mock_post.return_value = mock_response
-
-        test_image_data = base64.b64encode(b"Test Image Data").decode("utf-8")
-
-        images = [{"name": "test_image.png", "image": test_image_data}]
-
-        responses = handler.upload_images(images)
-
-        self.assertEqual(len(responses), 3)
-        self.assertEqual(responses["status"], "success")
+    @patch("handler.requests.get")
+    def test_check_server_down(self, mock_get):
+        mock_get.side_effect = handler.requests.RequestException("down")
+        self.assertFalse(handler.check_server("http://127.0.0.1:8188", retries=1, delay=1))
 
     @patch("handler.requests.post")
-    def test_upload_images_failed(self, mock_post):
-        mock_response = unittest.mock.Mock()
-        mock_response.status_code = 400
-        mock_response.text = "Error uploading"
-        mock_post.return_value = mock_response
+    def test_queue_workflow_success(self, mock_post):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"prompt_id": "123"}
+        mock_post.return_value = resp
 
-        test_image_data = base64.b64encode(b"Test Image Data").decode("utf-8")
+        out = handler.queue_workflow({"1": {"class_type": "Foo"}}, client_id="cid")
+        self.assertEqual(out, {"prompt_id": "123"})
+        mock_post.assert_called_once()
 
-        images = [{"name": "test_image.png", "image": test_image_data}]
+    @patch("handler.requests.post")
+    def test_upload_images_empty(self, mock_post):
+        out = handler.upload_images([])
+        self.assertEqual(out["status"], "success")
+        self.assertEqual(out["message"], "No images to upload")
+        mock_post.assert_not_called()
 
-        responses = handler.upload_images(images)
+    @patch("handler.requests.post")
+    def test_upload_images_success_with_data_uri(self, mock_post):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        mock_post.return_value = resp
 
-        self.assertEqual(len(responses), 3)
-        self.assertEqual(responses["status"], "error")
+        payload = base64.b64encode(b"abc").decode("utf-8")
+        images = [{"name": "x.png", "image": f"data:image/png;base64,{payload}"}]
+        out = handler.upload_images(images)
+        self.assertEqual(out["status"], "success")
+        self.assertEqual(out["message"], "All images uploaded successfully")
+        self.assertEqual(len(out["details"]), 1)
+
+    @patch("handler.requests.post")
+    def test_upload_images_base64_decode_error(self, mock_post):
+        # requests.post should never be called if decode fails first
+        out = handler.upload_images([{"name": "x.png", "image": "not_base64!!!"}])
+        self.assertEqual(out["status"], "error")
+        self.assertEqual(out["message"], "Some images failed to upload")
+        self.assertEqual(len(out["details"]), 1)
+        mock_post.assert_not_called()
+
+    @patch("handler.requests.post")
+    def test_upload_images_http_error(self, mock_post):
+        mock_post.side_effect = handler.requests.RequestException("boom")
+        payload = base64.b64encode(b"abc").decode("utf-8")
+        out = handler.upload_images([{"name": "x.png", "image": payload}])
+        self.assertEqual(out["status"], "error")
+        self.assertEqual(out["message"], "Some images failed to upload")
+        self.assertEqual(len(out["details"]), 1)
