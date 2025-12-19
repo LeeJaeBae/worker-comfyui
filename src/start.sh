@@ -12,14 +12,27 @@ echo "worker-comfyui: Starting ComfyUI"
 # Allow operators to tweak verbosity; default is DEBUG.
 : "${COMFY_LOG_LEVEL:=DEBUG}"
 
+# Check if Network Volume ComfyUI exists and use it instead of container ComfyUI
+COMFYUI_PATH="/comfyui"
+if [ -f "/runpod-volume/runpod-slim/ComfyUI/main.py" ]; then
+    echo "worker-comfyui: Using ComfyUI from Network Volume"
+    COMFYUI_PATH="/runpod-volume/runpod-slim/ComfyUI"
+
+    # Copy extra_model_paths.yaml to Network Volume ComfyUI if it doesn't exist
+    if [ ! -f "${COMFYUI_PATH}/extra_model_paths.yaml" ]; then
+        cp /comfyui/extra_model_paths.yaml ${COMFYUI_PATH}/
+        echo "worker-comfyui: Copied extra_model_paths.yaml to Network Volume ComfyUI"
+    fi
+fi
+
 # Serve the API and don't shutdown the container
 if [ "$SERVE_API_LOCALLY" == "true" ]; then
-    python -u /comfyui/main.py --disable-auto-launch --disable-metadata --listen --verbose "${COMFY_LOG_LEVEL}" --log-stdout &
+    python -u ${COMFYUI_PATH}/main.py --disable-auto-launch --disable-metadata --listen --verbose "${COMFY_LOG_LEVEL}" --log-stdout &
 
     echo "worker-comfyui: Starting RunPod Handler"
     python -u /handler.py --rp_serve_api --rp_api_host=0.0.0.0
 else
-    python -u /comfyui/main.py --disable-auto-launch --disable-metadata --verbose "${COMFY_LOG_LEVEL}" --log-stdout &
+    python -u ${COMFYUI_PATH}/main.py --disable-auto-launch --disable-metadata --verbose "${COMFY_LOG_LEVEL}" --log-stdout &
 
     echo "worker-comfyui: Starting RunPod Handler"
     python -u /handler.py
