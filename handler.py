@@ -27,9 +27,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Time to wait between API check attempts in milliseconds
-COMFY_API_AVAILABLE_INTERVAL_MS = 50
+COMFY_API_AVAILABLE_INTERVAL_MS = 1000  # 1 second
 # Maximum number of API check attempts
-COMFY_API_AVAILABLE_MAX_RETRIES = 500
+COMFY_API_AVAILABLE_MAX_RETRIES = 30  # 30 seconds max wait
 # Websocket reconnection behaviour (can be overridden through environment variables)
 # NOTE: more attempts and diagnostics improve debuggability whenever ComfyUI crashes mid-job.
 #   • WEBSOCKET_RECONNECT_ATTEMPTS sets how many times we will try to reconnect.
@@ -514,33 +514,75 @@ def handler(job):
     Returns:
         dict: A dictionary containing either an error message or a success status with generated images.
     """
+    print("=" * 50)
+    print("WORKER-COMFYUI HANDLER STARTED")
+    print("=" * 50)
+
+    # Set a hard timeout for the entire handler (30 minutes)
+    import signal
+    def timeout_handler(signum, frame):
+        print("worker-comfyui: HARD TIMEOUT - Handler exceeded 30 minutes")
+        raise TimeoutError("Handler timeout after 30 minutes")
+
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(30 * 60)  # 30 minutes
+
+    print("worker-comfyui: Hard timeout set to 30 minutes")
+    print(f"worker-comfyui: Job ID: {job.get('id', 'unknown')}")
+    print(f"worker-comfyui: Job input keys: {list(job.keys()) if isinstance(job, dict) else 'not dict'}")
+    print(f"worker-comfyui: Environment variables:")
+    for key in ['RUNPOD_COMFY_ENDPOINT_ID', 'RUNPOD_COMFY_API_KEY', 'REFRESH_WORKER', 'NETWORK_VOLUME_DEBUG']:
+        value = os.environ.get(key, 'NOT_SET')
+        print(f"  {key}: {value}")
+    print("=" * 50)
+
     # ---------------------------------------------------------------------------
     # Network Volume Diagnostics (opt-in via NETWORK_VOLUME_DEBUG=true)
     # ---------------------------------------------------------------------------
     if is_network_volume_debug_enabled():
+        print("worker-comfyui: Running network volume diagnostics...")
+        run_network_volume_diagnostics()
+    else:
+        print("worker-comfyui: Network volume debug disabled (set NETWORK_VOLUME_DEBUG=true to enable)")
+        # Force enable for debugging
+        print("worker-comfyui: Temporarily enabling network volume diagnostics for debugging...")
         run_network_volume_diagnostics()
 
-    job_input = job["input"]
-    job_id = job["id"]
+    try:
+        job_input = job["input"]
+        job_id = job["id"]
+        print(f"worker-comfyui: Job input type: {type(job_input)}")
+    except KeyError as e:
+        print(f"worker-comfyui: Missing required job field: {e}")
+        return {"error": f"Missing required job field: {e}"}
 
     # Make sure that the input is valid
+    print("worker-comfyui: Validating input...")
     validated_data, error_message = validate_input(job_input)
     if error_message:
+        print(f"worker-comfyui: Input validation failed: {error_message}")
         return {"error": error_message}
+    print("worker-comfyui: Input validation passed")
 
     # Extract validated data
     workflow = validated_data["workflow"]
     input_images = validated_data.get("images")
 
     # Make sure that the ComfyUI HTTP API is available before proceeding
-    if not check_server(
+    print(f"worker-comfyui: Checking ComfyUI server at {COMFY_HOST}...")
+    server_reachable = check_server(
         f"http://{COMFY_HOST}/",
         COMFY_API_AVAILABLE_MAX_RETRIES,
         COMFY_API_AVAILABLE_INTERVAL_MS,
-    ):
+    )
+
+    if not server_reachable:
+        print(f"worker-comfyui: ComfyUI server not reachable after {COMFY_API_AVAILABLE_MAX_RETRIES} attempts")
+        print("worker-comfyui: This might indicate ComfyUI failed to start or crashed")
         return {
-            "error": f"ComfyUI server ({COMFY_HOST}) not reachable after multiple retries."
+            "error": f"ComfyUI server ({COMFY_HOST}) not reachable after {COMFY_API_AVAILABLE_MAX_RETRIES} attempts. Check if ComfyUI started successfully."
         }
+    print("worker-comfyui: ComfyUI server is reachable - proceeding with workflow")
 
     # Upload input images if they exist
     if input_images:
